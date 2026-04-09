@@ -1,4 +1,4 @@
-# secretary
+﻿# secretary
 
 A Feishu group chat scheduler bot MVP built with FastAPI, SQLite, APScheduler, and optional OpenAI parsing.
 
@@ -31,3 +31,10 @@ uvicorn app.main:app --reload
 - `15分钟后提醒`
 - `今晚8点提醒`
 - `改到明天9点`
+
+## Deployment Notes
+
+- The app service listens on `127.0.0.1:8001`
+- Feishu callback path: `/webhooks/feishu/events`
+- Suggested public health check path: `/secretary/healthz`
+- Example deployment files are under `deploy/systemd` and `deploy/nginx`
