@@ -1,8 +1,13 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 from dataclasses import dataclass
 from functools import lru_cache
+
+from dotenv import load_dotenv
+
+
+load_dotenv()
 
 
 def _get_int(name: str, default: int) -> int:
