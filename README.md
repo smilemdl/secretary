@@ -1,6 +1,6 @@
 ﻿# secretary
 
-A personal scheduler web MVP built with FastAPI, SQLite, APScheduler, and optional OpenAI parsing.
+A personal scheduler web MVP built with FastAPI, SQLite, APScheduler, and a configurable OpenAI-compatible LLM backend.
 
 ## MVP Scope
 
@@ -31,6 +31,19 @@ uvicorn app.main:app --reload
 - `15分钟后提醒`
 - `今晚8点提醒`
 - `改到明天9点`
+
+## LLM Backend
+
+The app uses rule parsing first, then falls back to a configurable OpenAI-compatible backend.
+
+Example DashScope-compatible configuration:
+
+```env
+LLM_API_KEY=your-key
+LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+LLM_MODEL=qwen3.5-flash-2026-02-23
+LLM_ENABLE_THINKING=false
+```
 
 ## Deployment Notes
 
