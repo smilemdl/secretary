@@ -1,47 +1,42 @@
 ﻿from __future__ import annotations
 
-import hashlib
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
-from fastapi import Depends, FastAPI, HTTPException
-from sqlalchemy import select
+from fastapi import Depends, FastAPI
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.database import SessionLocal, get_session, init_db
-from app.models import MessageDedup
 from app.services.command_handler import CommandHandler
-from app.services.feishu import FeishuClient, parse_event
 from app.services.reminder_service import ReminderService
+from app.services.task_service import TaskService
+from app.time_utils import utcnow
 
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+BASE_DIR = Path(__file__).resolve().parent
+WEB_DIR = BASE_DIR / "web"
+
+
+class CommandRequest(BaseModel):
+    text: str
 
 
 def _build_scheduler(settings: Settings) -> BackgroundScheduler:
     scheduler = BackgroundScheduler(timezone=settings.default_timezone)
-    reminder_service = ReminderService(SessionLocal, FeishuClient(settings), settings)
+    reminder_service = ReminderService(SessionLocal, settings)
     scheduler.add_job(
         reminder_service.process_due_tasks,
         "interval",
         seconds=settings.reminder_scan_interval_seconds,
         id="scan_due_tasks",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        reminder_service.send_evening_summary,
-        CronTrigger(hour=20, minute=30, timezone=settings.default_timezone),
-        id="evening_summary",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        reminder_service.send_overdue_summary,
-        CronTrigger(hour=9, minute=0, timezone=settings.default_timezone),
-        id="overdue_summary",
         replace_existing=True,
     )
     return scheduler
@@ -62,6 +57,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=get_settings().app_name, lifespan=lifespan)
+app.mount("/assets", StaticFiles(directory=WEB_DIR), name="assets")
 
 
 @app.get("/healthz")
@@ -69,50 +65,70 @@ def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/webhooks/feishu/events")
-def feishu_events(
-    payload: dict,
+@app.get("/")
+def index() -> FileResponse:
+    return FileResponse(WEB_DIR / "index.html")
+
+
+@app.get("/api/state")
+def get_state(
     session: Session = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
-    challenge = payload.get("challenge")
-    if challenge:
-        return {"challenge": challenge}
+    return _build_state_payload(session, settings)
 
-    verification_token = payload.get("token")
-    if settings.feishu_verification_token and verification_token != settings.feishu_verification_token:
-        raise HTTPException(status_code=403, detail="invalid verification token")
 
-    incoming = parse_event(payload)
-    if incoming is None or not incoming.mentioned:
-        return {"code": 0}
-
-    if not incoming.event_id or not incoming.message_id:
-        return {"code": 0}
-
-    existing = session.scalar(select(MessageDedup).where(MessageDedup.event_id == incoming.event_id))
-    if existing is not None:
-        return {"code": 0}
-
+@app.post("/api/commands")
+def execute_command(
+    payload: CommandRequest,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
     handler = CommandHandler(session, settings)
-    result = handler.handle_message(
-        owner_open_id=incoming.open_id,
-        chat_id=incoming.chat_id,
-        message_id=incoming.message_id,
-        text=incoming.text,
+    result = handler.handle_command(
+        owner_id=settings.default_owner_id,
+        context_id=settings.default_context_id,
+        request_id=None,
+        text=payload.text,
     )
-
-    dedup = MessageDedup(
-        event_id=incoming.event_id,
-        message_id=incoming.message_id,
-        result_hash=hashlib.sha256(result.reply_text.encode("utf-8")).hexdigest(),
-    )
-    session.add(dedup)
     session.commit()
+    return {
+        "reply_text": result.reply_text,
+        "state": _build_state_payload(session, settings),
+    }
 
-    try:
-        FeishuClient(settings).send_text(incoming.chat_id, result.reply_text)
-    except Exception as exc:
-        logger.exception("Failed to send reply to Feishu: %s", exc)
 
-    return {"code": 0}
+def _build_state_payload(session: Session, settings: Settings) -> dict[str, object]:
+    task_service = TaskService(session, settings.default_timezone)
+    _refresh_due_tasks(task_service)
+    current_tasks = task_service.list_current_tasks(settings.default_owner_id, settings.default_context_id)
+    today_tasks = task_service.list_today_tasks(settings.default_owner_id, settings.default_context_id)
+    pending_tasks = task_service.list_pending_tasks(settings.default_owner_id, settings.default_context_id)
+    overdue_tasks = task_service.list_overdue_tasks(settings.default_owner_id, settings.default_context_id)
+
+    focus_task = task_service.serialize_task(current_tasks[0]) if current_tasks else None
+    summary = {
+        "today_count": len(today_tasks),
+        "pending_count": len(pending_tasks),
+        "overdue_count": len(overdue_tasks),
+    }
+
+    return {
+        "server_time": utcnow().isoformat(),
+        "poll_interval_seconds": settings.web_poll_interval_seconds,
+        "focus_task": focus_task,
+        "current_tasks": [task_service.serialize_task(task) for task in current_tasks],
+        "today_tasks": [task_service.serialize_task(task) for task in today_tasks],
+        "pending_tasks": [task_service.serialize_task(task) for task in pending_tasks],
+        "overdue_tasks": [task_service.serialize_task(task) for task in overdue_tasks],
+        "summary": summary,
+    }
+
+
+def _refresh_due_tasks(task_service: TaskService) -> None:
+    now_utc = utcnow()
+    due_tasks = task_service.get_due_tasks(now_utc)
+    for task in due_tasks:
+        task_service.mark_reminder_sent(task, now_utc)
+    if due_tasks:
+        task_service.session.commit()

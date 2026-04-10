@@ -18,6 +18,11 @@ ACTIONABLE_STATUSES = [
     TaskStatus.OVERDUE.value,
 ]
 
+CURRENT_FOCUS_STATUSES = [
+    TaskStatus.AWAITING_ACTION.value,
+    TaskStatus.OVERDUE.value,
+]
+
 
 class TaskService:
     def __init__(self, session: Session, default_timezone: str) -> None:
@@ -26,8 +31,8 @@ class TaskService:
 
     def create_task(
         self,
-        owner_open_id: str,
-        chat_id: str,
+        owner_id: str,
+        context_id: str,
         title: str,
         scheduled_at: datetime,
         detail: str = "",
@@ -35,8 +40,8 @@ class TaskService:
         created_from_message_id: str | None = None,
     ) -> Task:
         task = Task(
-            owner_open_id=owner_open_id,
-            chat_id=chat_id,
+            owner_open_id=owner_id,
+            chat_id=context_id,
             title=title,
             detail=detail,
             scheduled_at=scheduled_at,
@@ -51,14 +56,14 @@ class TaskService:
         self._record_event(task.id, EventType.CREATED, {"title": title, "scheduled_at": scheduled_at.isoformat()})
         return task
 
-    def list_today_tasks(self, owner_open_id: str, chat_id: str, now_utc: datetime | None = None) -> list[Task]:
+    def list_today_tasks(self, owner_id: str, context_id: str, now_utc: datetime | None = None) -> list[Task]:
         now_utc = now_utc or utcnow()
         day_start, day_end = local_day_bounds_utc(now_utc, self.default_timezone)
         stmt = (
             select(Task)
             .where(
-                Task.owner_open_id == owner_open_id,
-                Task.chat_id == chat_id,
+                Task.owner_open_id == owner_id,
+                Task.chat_id == context_id,
                 Task.scheduled_at >= day_start,
                 Task.scheduled_at < day_end,
                 Task.status.in_(ACTIONABLE_STATUSES),
@@ -67,20 +72,46 @@ class TaskService:
         )
         return list(self.session.scalars(stmt))
 
-    def list_pending_tasks(self, owner_open_id: str, chat_id: str) -> list[Task]:
+    def list_pending_tasks(self, owner_id: str, context_id: str) -> list[Task]:
         stmt = (
             select(Task)
             .where(
-                Task.owner_open_id == owner_open_id,
-                Task.chat_id == chat_id,
+                Task.owner_open_id == owner_id,
+                Task.chat_id == context_id,
                 Task.status.in_(ACTIONABLE_STATUSES),
             )
             .order_by(Task.scheduled_at.asc())
         )
         return list(self.session.scalars(stmt))
 
-    def complete_latest_task(self, owner_open_id: str, chat_id: str) -> Task | None:
-        task = self._get_latest_actionable_task(owner_open_id, chat_id)
+    def list_current_tasks(self, owner_id: str, context_id: str) -> list[Task]:
+        stmt = (
+            select(Task)
+            .where(
+                Task.owner_open_id == owner_id,
+                Task.chat_id == context_id,
+                Task.status.in_(CURRENT_FOCUS_STATUSES),
+            )
+            .order_by(Task.last_reminded_at.desc(), Task.scheduled_at.asc(), Task.id.desc())
+        )
+        return list(self.session.scalars(stmt))
+
+    def list_overdue_tasks(self, owner_id: str, context_id: str, now_utc: datetime | None = None) -> list[Task]:
+        now_utc = now_utc or utcnow()
+        stmt = (
+            select(Task)
+            .where(
+                Task.owner_open_id == owner_id,
+                Task.chat_id == context_id,
+                Task.status.in_(ACTIONABLE_STATUSES),
+                Task.scheduled_at < now_utc,
+            )
+            .order_by(Task.scheduled_at.asc())
+        )
+        return list(self.session.scalars(stmt))
+
+    def complete_latest_task(self, owner_id: str, context_id: str) -> Task | None:
+        task = self._get_latest_actionable_task(owner_id, context_id)
         if task is None:
             return None
         task.status = TaskStatus.DONE.value
@@ -89,8 +120,8 @@ class TaskService:
         self._record_event(task.id, EventType.COMPLETED, {})
         return task
 
-    def cancel_latest_task(self, owner_open_id: str, chat_id: str) -> Task | None:
-        task = self._get_latest_actionable_task(owner_open_id, chat_id)
+    def cancel_latest_task(self, owner_id: str, context_id: str) -> Task | None:
+        task = self._get_latest_actionable_task(owner_id, context_id)
         if task is None:
             return None
         task.status = TaskStatus.CANCELLED.value
@@ -101,12 +132,12 @@ class TaskService:
 
     def snooze_latest_task(
         self,
-        owner_open_id: str,
-        chat_id: str,
+        owner_id: str,
+        context_id: str,
         minutes: int | None = None,
         scheduled_at: datetime | None = None,
     ) -> Task | None:
-        task = self._get_latest_actionable_task(owner_open_id, chat_id)
+        task = self._get_latest_actionable_task(owner_id, context_id)
         if task is None:
             return None
 
@@ -125,8 +156,8 @@ class TaskService:
         )
         return task
 
-    def reschedule_latest_task(self, owner_open_id: str, chat_id: str, scheduled_at: datetime) -> Task | None:
-        task = self._get_latest_actionable_task(owner_open_id, chat_id)
+    def reschedule_latest_task(self, owner_id: str, context_id: str, scheduled_at: datetime) -> Task | None:
+        task = self._get_latest_actionable_task(owner_id, context_id)
         if task is None:
             return None
         task.status = TaskStatus.SNOOZED.value
@@ -145,22 +176,6 @@ class TaskService:
                 Task.next_remind_at <= now_utc,
             )
             .order_by(Task.next_remind_at.asc(), Task.id.asc())
-        )
-        return list(self.session.scalars(stmt))
-
-    def get_open_tasks(self) -> list[Task]:
-        stmt = select(Task).where(Task.status.in_(ACTIONABLE_STATUSES)).order_by(Task.chat_id.asc(), Task.scheduled_at.asc())
-        return list(self.session.scalars(stmt))
-
-    def get_overdue_tasks(self, now_utc: datetime | None = None) -> list[Task]:
-        now_utc = now_utc or utcnow()
-        stmt = (
-            select(Task)
-            .where(
-                Task.status.in_(ACTIONABLE_STATUSES),
-                Task.scheduled_at < now_utc,
-            )
-            .order_by(Task.chat_id.asc(), Task.scheduled_at.asc())
         )
         return list(self.session.scalars(stmt))
 
@@ -186,15 +201,27 @@ class TaskService:
 
         self._record_event(task.id, EventType.REMINDER_SENT, {"sent_at": sent_at.isoformat()})
 
+    def serialize_task(self, task: Task) -> dict[str, object]:
+        return {
+            "id": task.id,
+            "title": task.title,
+            "detail": task.detail,
+            "status": task.status,
+            "scheduled_at": format_user_datetime(task.scheduled_at, task.timezone),
+            "next_remind_at": format_user_datetime(task.next_remind_at, task.timezone),
+            "last_reminded_at": format_user_datetime(task.last_reminded_at, task.timezone),
+            "remind_count": task.remind_count,
+        }
+
     def format_task_line(self, task: Task) -> str:
         return f"- {format_user_datetime(task.scheduled_at, task.timezone)} {task.title} [{task.status}]"
 
-    def _get_latest_actionable_task(self, owner_open_id: str, chat_id: str) -> Task | None:
+    def _get_latest_actionable_task(self, owner_id: str, context_id: str) -> Task | None:
         stmt = (
             select(Task)
             .where(
-                Task.owner_open_id == owner_open_id,
-                Task.chat_id == chat_id,
+                Task.owner_open_id == owner_id,
+                Task.chat_id == context_id,
                 Task.status.in_(ACTIONABLE_STATUSES),
             )
             .order_by(Task.last_reminded_at.desc(), Task.scheduled_at.desc(), Task.id.desc())

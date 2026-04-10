@@ -24,7 +24,7 @@ class LLMInterpreter:
 
         client = OpenAI(api_key=self.settings.openai_api_key)
         prompt = (
-            "You are a command parser for a Feishu scheduler bot. "
+            "You are a command parser for a personal scheduler web app. "
             "Return JSON only with kind/title/scheduled_at/question. "
             "kind must be one of CREATE_TASK, LIST_TODAY, LIST_PENDING, COMPLETE_LATEST, "
             "CANCEL_LATEST, SNOOZE_LATEST, RESCHEDULE_LATEST, CLARIFY, UNKNOWN. "

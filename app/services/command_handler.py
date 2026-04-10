@@ -25,7 +25,7 @@ class CommandHandler:
         self.task_service = TaskService(session, settings.default_timezone)
         self.llm = LLMInterpreter(settings)
 
-    def handle_message(self, owner_open_id: str, chat_id: str, message_id: str | None, text: str) -> HandleResult:
+    def handle_command(self, owner_id: str, context_id: str, request_id: str | None, text: str) -> HandleResult:
         now_local = local_now(self.settings.default_timezone)
         command = parse_command(text, self.settings.default_timezone, now_local)
 
@@ -34,29 +34,29 @@ class CommandHandler:
             if llm_command is not None:
                 command = llm_command
 
-        reply_text = self._dispatch(command, owner_open_id, chat_id, message_id)
+        reply_text = self._dispatch(command, owner_id, context_id, request_id)
         return HandleResult(reply_text=reply_text)
 
     def _dispatch(
         self,
         command: ParsedCommand,
-        owner_open_id: str,
-        chat_id: str,
-        message_id: str | None,
+        owner_id: str,
+        context_id: str,
+        request_id: str | None,
     ) -> str:
         if command.kind == CommandType.CREATE_TASK:
             task = self.task_service.create_task(
-                owner_open_id=owner_open_id,
-                chat_id=chat_id,
+                owner_id=owner_id,
+                context_id=context_id,
                 title=command.title or "",
                 detail=command.detail or "",
                 scheduled_at=command.scheduled_at or datetime.utcnow(),
-                created_from_message_id=message_id,
+                created_from_message_id=request_id,
             )
             return f"已创建日程：{format_user_datetime(task.scheduled_at, task.timezone)} {task.title}"
 
         if command.kind == CommandType.LIST_TODAY:
-            tasks = self.task_service.list_today_tasks(owner_open_id, chat_id)
+            tasks = self.task_service.list_today_tasks(owner_id, context_id)
             if not tasks:
                 return "今天还没有未完成的日程。"
             lines = ["今日日程："]
@@ -64,7 +64,7 @@ class CommandHandler:
             return "\n".join(lines)
 
         if command.kind == CommandType.LIST_PENDING:
-            tasks = self.task_service.list_pending_tasks(owner_open_id, chat_id)
+            tasks = self.task_service.list_pending_tasks(owner_id, context_id)
             if not tasks:
                 return "当前没有未完成的事务。"
             lines = ["未完成事务："]
@@ -72,21 +72,21 @@ class CommandHandler:
             return "\n".join(lines)
 
         if command.kind == CommandType.COMPLETE_LATEST:
-            task = self.task_service.complete_latest_task(owner_open_id, chat_id)
+            task = self.task_service.complete_latest_task(owner_id, context_id)
             if task is None:
                 return "我没找到可以完成的事务。"
             return f"已完成：{format_user_datetime(task.scheduled_at, task.timezone)} {task.title}"
 
         if command.kind == CommandType.CANCEL_LATEST:
-            task = self.task_service.cancel_latest_task(owner_open_id, chat_id)
+            task = self.task_service.cancel_latest_task(owner_id, context_id)
             if task is None:
                 return "我没找到可以取消的事务。"
             return f"已取消：{format_user_datetime(task.scheduled_at, task.timezone)} {task.title}"
 
         if command.kind == CommandType.SNOOZE_LATEST:
             task = self.task_service.snooze_latest_task(
-                owner_open_id,
-                chat_id,
+                owner_id,
+                context_id,
                 minutes=command.minutes,
                 scheduled_at=command.scheduled_at,
             )
@@ -96,8 +96,8 @@ class CommandHandler:
 
         if command.kind == CommandType.RESCHEDULE_LATEST:
             task = self.task_service.reschedule_latest_task(
-                owner_open_id,
-                chat_id,
+                owner_id,
+                context_id,
                 scheduled_at=command.scheduled_at or datetime.utcnow(),
             )
             if task is None:
